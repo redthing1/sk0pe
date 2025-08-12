@@ -24,19 +24,9 @@ STOP_ADDRESS = 0x8000000000000000
 
 def setup_trace_hook(emu, log):
     """set up proper instruction trace hook"""
-    # get disassembler: unicorn has it as a method, triton needs capstone
-    if hasattr(emu, "disassembler"):
-        disasm = emu.disassembler()
-    else:
-        # triton: create capstone disassembler
-        import capstone
 
-        if emu.exe.arch.name == "ARM64":
-            disasm = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_ARM)
-        elif emu.exe.arch.name == "X64":
-            disasm = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
-        else:
-            disasm = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
+    # get disassembler for emu
+    disasm = emu.disassembler()
 
     def trace_code(address, size):
         # read and disassemble instruction

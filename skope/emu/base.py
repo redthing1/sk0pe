@@ -7,8 +7,14 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum, IntFlag
 from typing import Dict, List, Optional, Tuple, Callable, Any
-from functools import lru_cache
 from redlog import get_logger, field
+
+try:
+    import capstone as cs
+    HAS_CAPSTONE = True
+except ImportError:
+    HAS_CAPSTONE = False
+    cs = None
 
 
 class SkopeError(Exception):
@@ -372,3 +378,17 @@ class BareMetalEmulator(Emulator):
             self.mem_write(start, data)
             return True
         return False
+
+    def disassembler(self) -> Any:
+        """get a disassembler for this architecture"""
+        if not HAS_CAPSTONE:
+            raise RuntimeError("capstone is not installed")
+
+        arch_map = {
+            Arch.X86: (cs.CS_ARCH_X86, cs.CS_MODE_32),
+            Arch.X64: (cs.CS_ARCH_X86, cs.CS_MODE_64),
+            Arch.ARM64: (cs.CS_ARCH_ARM64, cs.CS_MODE_ARM),
+        }
+
+        arch, mode = arch_map[self.exe.arch]
+        return cs.Cs(arch, mode)

@@ -4,7 +4,6 @@ unicorn engine implementation of the emulator interface
 """
 
 from typing import Dict, List, Optional, Any
-from functools import lru_cache
 from redlog import get_logger, field
 
 from .base import BareMetalEmulator, Executable, Hook, Arch, Segment, Permission
@@ -17,14 +16,6 @@ try:
 except ImportError:
     HAS_UNICORN = False
     uc = None
-
-try:
-    import capstone as cs
-
-    HAS_CAPSTONE = True
-except ImportError:
-    HAS_CAPSTONE = False
-    cs = None
 
 
 class UnicornEmulator(BareMetalEmulator):
@@ -265,18 +256,3 @@ class UnicornEmulator(BareMetalEmulator):
     def halt(self) -> None:
         """stop emulation"""
         self._uc.emu_stop()
-
-    @lru_cache(maxsize=1)
-    def disassembler(self) -> Any:
-        """get a disassembler for this architecture"""
-        if not HAS_CAPSTONE:
-            raise RuntimeError("capstone is not installed")
-
-        arch_map = {
-            Arch.X86: (cs.CS_ARCH_X86, cs.CS_MODE_32),
-            Arch.X64: (cs.CS_ARCH_X86, cs.CS_MODE_64),
-            Arch.ARM64: (cs.CS_ARCH_ARM64, cs.CS_MODE_ARM),
-        }
-
-        arch, mode = arch_map[self.exe.arch]
-        return cs.Cs(arch, mode)
