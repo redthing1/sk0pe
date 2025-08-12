@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-demo: emulated function calling with proper calling conventions
-supports both triton and unicorn backends
+demo: emulate function calls in a test binary
+works with both unicorn and triton
 """
 
 from pathlib import Path
@@ -16,19 +16,19 @@ from skope.load.lief_loader import (
 from skope.emu import Hook
 from skope.emu.calling_convention import CallingConvention, Convention
 
-app = typer.Typer(help="demonstrate emulated function calling with different backends")
+app = typer.Typer(help="demo of emulated function calling")
 
-# stop address for function returns (must be higher than code addresses)
+# stop address for function returns (we can ret to garbage)
 STOP_ADDRESS = 0x8000000000000000
 
 
 def setup_trace_hook(emu, log):
     """set up proper instruction trace hook"""
-    # get disassembler - unicorn has it as a method, triton needs capstone
+    # get disassembler: unicorn has it as a method, triton needs capstone
     if hasattr(emu, "disassembler"):
         disasm = emu.disassembler()
     else:
-        # triton - create capstone disassembler
+        # triton: create capstone disassembler
         import capstone
 
         if emu.exe.arch.name == "ARM64":
@@ -100,7 +100,7 @@ def main(
         "unicorn", "--backend", "-b", help="emulation backend (unicorn or triton)"
     ),
     trace: bool = typer.Option(
-        False, "--trace", "-t", help="trace execution (print each instruction)"
+        False, "--trace", "-t", help="trace execution (print instructions)"
     ),
     verbose: int = typer.Option(
         0,
@@ -116,9 +116,9 @@ def main(
         help="force specific calling convention (cdecl, stdcall, fastcall, sysv64, win64, etc)",
     ),
 ):
-    """demonstrate calling functions in a binary with proper calling conventions"""
+    """demonstrate calling functions"""
 
-    # configure logging based on verbosity
+    # configure logging
     log = get_logger("demo")
     level = Level(min(Level.INFO + verbose, Level.ANNOYING))
     set_level(level)
@@ -128,7 +128,7 @@ def main(
     exe = load_binary(str(binary_path))
     log.info(f"format: {exe._format}, arch: {exe.arch.name}")
 
-    # find test functions
+    # functions to call in binary
     test_cases = [
         # (name, args, expected_result)
         ("no_args", [], 42),
@@ -142,7 +142,6 @@ def main(
         ("memory_test", [0x40001000, 42], 0),  # will need to set up memory
         ("read_global", [], 100),  # initial global value
         ("string_length", [0x40002000], 11),  # will need to set up string
-        # TODO: struct passing needs special handling in calling convention
     ]
 
     # find function addresses
