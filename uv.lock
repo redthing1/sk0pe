@@ -162,7 +162,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "capstone", specifier = ">=5.0.6" },
+    { name = "capstone", specifier = ">=5.0.0" },
     { name = "keystone-engine", git = "https://github.com/redthing1/keystone-engine.git?subdirectory=bindings%2Fpython" },
     { name = "lief", git = "https://github.com/lief-project/LIEF.git?subdirectory=api%2Fpython" },
     { name = "msgpack", specifier = ">=1.1.1" },

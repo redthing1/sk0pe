@@ -9,7 +9,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "capstone>=5.0.6",
+    "capstone>=5.0.0",
     "keystone-engine",
     "lief",
     "msgpack>=1.1.1",
