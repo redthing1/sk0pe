@@ -49,10 +49,10 @@ def get_arch_config(arch: str) -> Dict:
             "ks_mode": ks.KS_MODE_32,
         },
     }
-    return configs.get(arch, configs["arm64"])
+    return configs[arch]
 
 
-def find_basic_block_end(data: bytes, start_addr: int, arch: str = "arm64") -> int:
+def find_basic_block_end(data: bytes, start_addr: int, arch: str) -> int:
     """find end address of basic block (address after last instruction)"""
     config = get_arch_config(arch)
     md = cs.Cs(config["cs_arch"], config["cs_mode"])
@@ -78,7 +78,7 @@ def find_basic_block_end(data: bytes, start_addr: int, arch: str = "arm64") -> i
 
 
 def simplify_instruction(
-    mnemonic: str, operands: str, arch: str = "arm64"
+    mnemonic: str, operands: str, arch: str
 ) -> Optional[Tuple[str, str]]:
     """check if instruction can be simplified. returns (new_mnemonic, new_operands) or None"""
     rules = SIMPLIFICATION_RULES.get(arch, {})
@@ -89,16 +89,14 @@ def simplify_instruction(
     return None
 
 
-def disassemble_single(
-    data: bytes, address: int, arch: str = "arm64"
-) -> Optional[cs.CsInsn]:
+def disassemble_single(data: bytes, address: int, arch: str) -> Optional[cs.CsInsn]:
     """disassemble a single instruction"""
     config = get_arch_config(arch)
     md = cs.Cs(config["cs_arch"], config["cs_mode"])
     return next(md.disasm(data, address, 1), None)
 
 
-def assemble_single(asm_str: str, address: int, arch: str = "arm64") -> Optional[bytes]:
+def assemble_single(asm_str: str, address: int, arch: str) -> Optional[bytes]:
     """assemble a single instruction"""
     config = get_arch_config(arch)
     try:
@@ -111,7 +109,7 @@ def assemble_single(asm_str: str, address: int, arch: str = "arm64") -> Optional
 
 
 def patch_instruction(
-    data: bytes, offset: int, address: int, arch: str = "arm64"
+    data: bytes, offset: int, address: int, arch: str
 ) -> Optional[bytes]:
     """attempt to patch a single instruction. returns patched bytes or None if skipped"""
     # disassemble
@@ -146,7 +144,7 @@ def patch_instruction(
     return bytes(result)
 
 
-def patch_basic_block(data: bytes, start_addr: int, arch: str = "arm64") -> bytes:
+def patch_basic_block(data: bytes, start_addr: int, arch: str) -> bytes:
     """patch all simplifiable instructions in a basic block"""
     end_addr = find_basic_block_end(data, start_addr, arch)
     bb_size = end_addr - start_addr
@@ -174,9 +172,11 @@ def patch_basic_block(data: bytes, start_addr: int, arch: str = "arm64") -> byte
 
 
 # emulator integration (minimal coupling)
-def patch_single_instruction_in_emulator(emu, address: int, arch: str = None) -> bool:
+def patch_single_instruction_in_emulator(
+    emu, address: int, arch: Optional[str] = None
+) -> bool:
     """patch a single instruction in emulator memory if it can be simplified"""
-    if not arch:
+    if arch is None:
         arch = emu.exe.arch.name.lower()
 
     # read just enough for one instruction
