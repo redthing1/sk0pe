@@ -77,11 +77,12 @@ def find_basic_block_end(data: bytes, start_addr: int, arch: str) -> int:
     return last_addr
 
 
-def simplify_instruction(
+def lookup_simplify_rule(
     mnemonic: str, operands: str, arch: str
 ) -> Optional[Tuple[str, str]]:
     """check if instruction can be simplified. returns (new_mnemonic, new_operands) or None"""
     rules = SIMPLIFICATION_RULES.get(arch, {})
+    # check if there's a simplification rule for this mnemonic
     if mnemonic in rules:
         new_mnemonic, comment = rules[mnemonic]
         log.dbg(f"simplifying {mnemonic} → {new_mnemonic} ({comment})")
@@ -119,7 +120,7 @@ def patch_instruction(
         return None
 
     # check if we can simplify
-    simplified = simplify_instruction(insn.mnemonic, insn.op_str, arch)
+    simplified = lookup_simplify_rule(insn.mnemonic, insn.op_str, arch)
     if not simplified:
         return None  # no simplification needed
 
@@ -142,6 +143,12 @@ def patch_instruction(
     result[offset : offset + insn.size] = new_bytes
     log.dbg(f"patched 0x{address:x}: {insn.mnemonic} → {simplified[0]}")
     return bytes(result)
+
+
+# helper for simplify or return original
+def simplify_instruction(data: bytes, address: int, arch: str) -> bytes:
+    patched = patch_instruction(data, 0, address, arch)
+    return patched if patched else data
 
 
 def patch_basic_block(data: bytes, start_addr: int, arch: str) -> bytes:
