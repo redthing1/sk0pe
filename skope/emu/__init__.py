@@ -13,11 +13,12 @@ from .base import (
     BareMetalEmulator,
 )
 from .unicorn import UnicornEmulator
+from .miasm import MiasmEmulator
 
 __all__ = [
     # base types
     "Arch",
-    "Hook",
+    "Hook", 
     "MemoryRegion",
     "Segment",
     # abstract interfaces
@@ -27,4 +28,5 @@ __all__ = [
     # concrete implementations
     "RawCodeBlob",
     "UnicornEmulator",
+    "MiasmEmulator",
 ]
