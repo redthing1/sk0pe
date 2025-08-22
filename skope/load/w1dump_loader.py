@@ -9,7 +9,6 @@ from redlog import get_logger, field
 from ..emu.base import Executable, Arch, Segment, Hook
 from ..emu.unicorn import UnicornEmulator
 from ..emu.triton import TritonEmulator
-from ..emu.miasm import MiasmEmulator
 from ..formats.w1dump import W1Dump, load_dump
 
 
@@ -310,51 +309,38 @@ def create_w1dump_triton_emulator(
 
 def create_w1dump_miasm_emulator(
     dump_path: str, module_name: Optional[str] = None, hooks: Hook = Hook.DEFAULT
-) -> Tuple[MiasmEmulator, W1Dump]:
-    """create miasm emulator from w1dump file"""
+) -> Tuple["MiasmJitterEmulator", W1Dump]:
+    """create a miasm jitter emulator from a w1dump file"""
+    from ..emu.miasm import MiasmJitterEmulator
+    
     log = get_logger("w1dump.loader")
-    log.debug(f"creating miasm emulator from {dump_path}")
-
-    # load dump and create executable
-    dump = load_w1dump(dump_path)
-    exe = W1DumpExecutable(dump, module_name)
-
+    log.dbg(f"creating miasm emulator from {dump_path}")
+    
+    # load the dump
+    dump = load_dump(dump_path)
+    
+    # create executable
+    exe = W1DumpExecutable(dump, module_name=module_name)
+    
     # create emulator
-    emu = MiasmEmulator(exe, hooks)
-
-    # set up memory callback for lazy loading
-    def memory_callback(addr: int):
-        region = dump.get_region_at(addr)
-        if region and region.data:
-            # load region data into emulator
-            emu.mem_write(region.start, region.data)
-            log.dbg(f"lazy loaded memory region at 0x{region.start:x} (size: {len(region.data)})")
-
+    emu = MiasmJitterEmulator(exe)
+    
+    # add memory callback for lazy loading
+    def memory_callback(address: int, size: int) -> Optional[Segment]:
+        """callback for lazy loading memory regions"""
+        region_data = exe.get_memory_region(address)
+        if region_data:
+            # unpack the tuple returned by get_memory_region
+            start, data, permissions = region_data
+            # create a Segment object for the callback
+            return Segment(start, data, permissions)
+        return None
+    
     emu.add_memory_callback(memory_callback)
-
+    
     # load initial register state
     loader = W1DumpLoader(dump)
-    if dump.thread.gpr_state:
-        # manually load registers since we don't have the unified interface yet
-        gpr = dump.thread.gpr_state
-        
-        if exe.arch == Arch.ARM64:
-            # load ARM64 registers
-            for i in range(31):  # x0-x30
-                reg_name = f"X{i}"
-                if hasattr(gpr, f"x{i}"):
-                    value = getattr(gpr, f"x{i}")
-                    if value != 0:
-                        emu.reg_write(reg_name, value)
-                        log.dbg(f"x{i} = 0x{value:x}")
-            
-            # load special registers
-            if hasattr(gpr, "sp"):
-                emu.reg_write("SP", gpr.sp)
-                log.dbg(f"sp = 0x{gpr.sp:x}")
-            if hasattr(gpr, "pc"):
-                emu.reg_write("PC", gpr.pc)
-                log.dbg(f"pc = 0x{gpr.pc:x}")
-
-    log.debug("miasm emulator created successfully")
+    loader.load_registers_from_dump(emu)
+    
+    log.dbg("miasm emulator created successfully")
     return emu, dump

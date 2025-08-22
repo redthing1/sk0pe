@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-Miasm symbolic execution engine implementation of the emulator interface
+Miasm emulator using proper jitter for bare metal dump loading
+follows the skope pattern for easy dump loading
 """
 
 from typing import Dict, List, Optional, Any, Tuple, Callable, Union
-from dataclasses import dataclass
-from functools import lru_cache
-from enum import Enum
 from redlog import get_logger, field
 
 from .base import (
@@ -20,432 +18,295 @@ from .base import (
 )
 from .arch import get_pc_register, get_sp_register
 
-import miasm
-
-try:
-    from miasm.core.locationdb import LocationDB
-    from miasm.arch.aarch64.arch import mn_aarch64
-    from miasm.arch.aarch64.sem import Lifter_Aarch64l
-    from miasm.arch.x86.arch import mn_x86
-    from miasm.arch.x86.sem import Lifter_X86_32, Lifter_X86_64
-    from miasm.ir.symbexec import SymbolicExecutionEngine
-    from miasm.expression.expression import *
-    from miasm.core.utils import decode_hex
-    HAS_MIASM = True
-except ImportError as e:
-    HAS_MIASM = False
-    LocationDB = None
-    mn_aarch64 = None
-    Lifter_Aarch64l = None
-    mn_x86 = None
-    Lifter_X86_32 = None
-    Lifter_X86_64 = None
-    SymbolicExecutionEngine = None
+# miasm imports
+from miasm.analysis.machine import Machine
+from miasm.core.locationdb import LocationDB
+from miasm.jitter.csts import PAGE_READ, PAGE_WRITE, PAGE_EXEC
 
 
-@dataclass
-class RegisterSymbolicInfo:
-    """information about a register's symbolic state"""
-    name: str
-    concrete_value: Optional[int]
-    is_symbolic: bool
-    symbolic_expr: Optional[str] = None
-    comment: Optional[str] = None
-
-
-class MiasmEmulator(BareMetalEmulator):
-    """miasm symbolic execution engine implementation"""
-
-    def __init__(self, executable: Executable, hooks: Hook = Hook.DEFAULT):
-        if not HAS_MIASM:
-            raise RuntimeError("miasm is not installed")
-
-        self._loc_db: Optional[LocationDB] = None
-        self._lifter = None
-        self._symb_engine: Optional[SymbolicExecutionEngine] = None
-        self._mn = None  # machine module
-        self._regs = None  # register module
-        self._pc_reg = None
-        self._sp_reg = None
-        self._memory_lazy_load_callback: Optional[Callable] = None
-        self._instruction_cache: Dict[int, Any] = {}
+class MiasmJitterEmulator(BareMetalEmulator):
+    """miasm emulator using jitter for bare metal dump loading"""
+    
+    def __init__(self, executable: Executable):
+        """initialize the miasm jitter emulator"""
+        self.log = get_logger("miasm.jitter")
         
-        super().__init__(executable, hooks)
-
-    def _setup(self) -> None:
-        """initialize Miasm components"""
-        self.log.dbg("setting up miasm emulator", field("arch", self.exe.arch))
+        # setup architecture
+        arch_map = {
+            Arch.X86: "x86_32",
+            Arch.X64: "x86_64",
+            Arch.ARM64: "aarch64l",  # little-endian ARM64
+        }
         
-        # create location database
+        if executable.arch not in arch_map:
+            raise EmulationError(f"unsupported architecture: {executable.arch}")
+        
+        arch_name = arch_map[executable.arch]
+        
+        # create miasm machine and jitter
         self._loc_db = LocationDB()
+        self._machine = Machine(arch_name)
+        self._jitter = self._machine.jitter(self._loc_db, "python")  # use python jitter for flexibility
         
-        # initialize architecture-specific components
-        if self.exe.arch == Arch.ARM64:
-            self._mn = mn_aarch64
-            self._lifter = Lifter_Aarch64l(self._loc_db)
-            self._regs = mn_aarch64.regs
-            self._pc_reg = self._regs.PC
-            self._sp_reg = self._regs.SP
-        elif self.exe.arch == Arch.X64:
-            self._mn = mn_x86
-            self._lifter = Lifter_X86_64(self._loc_db)
-            self._regs = mn_x86.regs
-            self._pc_reg = self._regs.RIP
-            self._sp_reg = self._regs.RSP
-        elif self.exe.arch == Arch.X86:
-            self._mn = mn_x86
-            self._lifter = Lifter_X86_32(self._loc_db)
-            self._regs = mn_x86.regs
-            self._pc_reg = self._regs.EIP
-            self._sp_reg = self._regs.ESP
-        else:
-            raise ValueError(f"unsupported architecture: {self.exe.arch}")
-
-        # create symbolic execution engine
-        self._symb_engine = SymbolicExecutionEngine(self._lifter)
+        # initialize stack
+        self._jitter.init_stack()
         
-        self.log.dbg("miasm emulator setup complete")
-
+        # memory management for lazy loading
+        self._memory_callbacks = []
+        self._loaded_segments = set()
+        
+        # call parent constructor which calls _setup()
+        super().__init__(executable)
+        
+        self.log.dbg("miasm jitter emulator initialized", field("arch", arch_name))
+    
+    def _setup(self) -> None:
+        """initialize the emulator - called by parent constructor"""
+        # load initial memory segments from executable
+        self._load_initial_memory()
+    
+    def _load_initial_memory(self):
+        """load memory segments from executable"""
+        for segment in self.exe.get_segments():
+            self.map_memory(segment.address, segment.size, segment.permissions)
+            if segment.data:
+                self.mem_write(segment.address, segment.data)
+            self._loaded_segments.add((segment.address, segment.size))
+            self.log.dbg(f"loaded segment @ 0x{segment.address:x} size=0x{segment.size:x}")
+    
+    def _permission_to_miasm(self, perm: Permission) -> int:
+        """convert skope permission to miasm permission"""
+        miasm_perm = 0
+        if perm & Permission.READ:
+            miasm_perm |= PAGE_READ
+        if perm & Permission.WRITE:
+            miasm_perm |= PAGE_WRITE
+        if perm & Permission.EXECUTE:
+            miasm_perm |= PAGE_EXEC
+        return miasm_perm
+    
+    # abstract method implementations
+    def _map(self, address: int, size: int, permissions: Permission) -> None:
+        """internal method to map memory in the engine"""
+        miasm_perm = self._permission_to_miasm(permissions)
+        
+        # align size to page boundary
+        page_size = 0x1000
+        aligned_size = ((size + page_size - 1) // page_size) * page_size
+        
+        # allocate memory in jitter
+        self._jitter.vm.add_memory_page(address, miasm_perm, b"\x00" * aligned_size)
+    
+    def _get_pc_reg(self) -> str:
+        """get the program counter register name for this backend"""
+        return get_pc_register(self.exe.arch)
+    
+    def _get_sp_reg(self) -> str:
+        """get the stack pointer register name for this backend"""
+        return get_sp_register(self.exe.arch)
+    
+    # memory operations
+    def map_memory(self, address: int, size: int, permissions: Permission) -> None:
+        """map memory with generic Permission enum"""
+        self._map(address, size, permissions)
+        self.log.dbg(f"mapped memory @ 0x{address:x} size=0x{size:x} perm={permissions}")
+    
+    def mem_unmap(self, address: int, size: int) -> None:
+        """unmap memory region"""
+        self._jitter.vm.remove_memory_page(address)
+        self.log.dbg(f"unmapped memory @ 0x{address:x}")
+    
     def mem_read(self, address: int, size: int) -> bytes:
-        """read memory from emulator"""
+        """read memory"""
+        # check for lazy loading
+        if not self._is_memory_mapped(address):
+            self._lazy_load_memory(address, size)
+        
         try:
-            # try to get concrete memory from symbolic engine
-            data = bytearray()
-            for i in range(size):
-                addr = address + i
-                mem_expr = ExprMem(ExprInt(addr, self.exe.arch.bits), 8)
-                
-                if mem_expr in self._symb_engine.symbols:
-                    val_expr = self._symb_engine.symbols[mem_expr]
-                    if isinstance(val_expr, ExprInt):
-                        data.append(val_expr.arg)
-                    else:
-                        # symbolic memory, try lazy load
-                        if self._memory_lazy_load_callback:
-                            self._memory_lazy_load_callback(addr)
-                            # retry after callback
-                            if mem_expr in self._symb_engine.symbols:
-                                val_expr = self._symb_engine.symbols[mem_expr]
-                                if isinstance(val_expr, ExprInt):
-                                    data.append(val_expr.arg)
-                                else:
-                                    data.append(0)  # default for symbolic
-                            else:
-                                data.append(0)
-                        else:
-                            data.append(0)  # default for symbolic
-                else:
-                    # memory not defined, try lazy load
-                    if self._memory_lazy_load_callback:
-                        self._memory_lazy_load_callback(addr)
-                        # retry after callback
-                        mem_expr = ExprMem(ExprInt(addr, self.exe.arch.bits), 8)
-                        if mem_expr in self._symb_engine.symbols:
-                            val_expr = self._symb_engine.symbols[mem_expr]
-                            if isinstance(val_expr, ExprInt):
-                                data.append(val_expr.arg)
-                            else:
-                                data.append(0)
-                        else:
-                            data.append(0)
-                    else:
-                        data.append(0)
-            
-            return bytes(data)
+            return self._jitter.vm.get_mem(address, size)
         except Exception as e:
-            self.log.err(f"memory read failed at 0x{address:x}: {e}")
-            raise EmulationError(f"memory read failed: {e}")
-
+            raise EmulationError(f"memory read failed @ 0x{address:x}: {e}")
+    
     def mem_write(self, address: int, data: bytes) -> None:
-        """write memory to emulator"""
-        try:
-            for i, byte_val in enumerate(data):
-                addr = address + i
-                mem_expr = ExprMem(ExprInt(addr, self.exe.arch.bits), 8)
-                val_expr = ExprInt(byte_val, 8)
-                self._symb_engine.symbols[mem_expr] = val_expr
-        except Exception as e:
-            self.log.err(f"memory write failed at 0x{address:x}: {e}")
-            raise EmulationError(f"memory write failed: {e}")
-
-    def reg_read(self, reg_id: Any) -> int:
-        """read register from emulator"""
-        try:
-            # convert reg_id to miasm register if needed
-            if isinstance(reg_id, str):
-                # handle different register name formats
-                reg_name = reg_id.upper()
-                if hasattr(self._regs, reg_name):
-                    reg = getattr(self._regs, reg_name)
-                else:
-                    # try without prefix for arm64 (e.g., "X8" -> "8")
-                    if reg_name.startswith('X') and reg_name[1:].isdigit():
-                        reg = getattr(self._regs, reg_name[1:])
-                    else:
-                        raise AttributeError(f"register {reg_name} not found")
-            else:
-                reg = reg_id
-            
-            if reg in self._symb_engine.symbols:
-                val_expr = self._symb_engine.symbols[reg]
-                if isinstance(val_expr, ExprInt):
-                    return val_expr.arg
-                else:
-                    # symbolic register - return 0 for now
-                    # TODO: could evaluate with concrete model
-                    return 0
-            else:
-                return 0
-        except Exception as e:
-            self.log.err(f"register read failed for {reg_id}: {e}")
-            raise EmulationError(f"register read failed: {e}")
-
-    def reg_write(self, reg_id: Any, value: int) -> None:
-        """write register to emulator"""
-        try:
-            # convert reg_id to miasm register if needed
-            if isinstance(reg_id, str):
-                # handle different register name formats  
-                reg_name = reg_id.upper()
-                if hasattr(self._regs, reg_name):
-                    reg = getattr(self._regs, reg_name)
-                else:
-                    # try without prefix for arm64 (e.g., "X8" -> "8") 
-                    if reg_name.startswith('X') and reg_name[1:].isdigit():
-                        reg_num = reg_name[1:]
-                        reg = getattr(self._regs, reg_num)
-                    elif reg_name == 'SP':
-                        reg = getattr(self._regs, 'SP')
-                    elif reg_name == 'PC':
-                        reg = getattr(self._regs, 'PC')
-                    else:
-                        raise AttributeError(f"register {reg_name} not found")
-            else:
-                reg = reg_id
-            
-            val_expr = ExprInt(value, reg.size)
-            self._symb_engine.symbols[reg] = val_expr
-        except Exception as e:
-            self.log.err(f"register write failed for {reg_id}: {e}")
-            raise EmulationError(f"register write failed: {e}")
-
-    def emulate(self, start: Optional[int] = None, end: Optional[int] = None, 
-                count: int = 0, timeout: int = 0) -> Any:
-        """emulate instructions using miasm symbolic execution"""
-        if start is None:
-            start = self.reg_read(self._pc_reg)
-        
-        self.log.dbg(f"starting emulation from 0x{start:x}")
-        
-        current_pc = start
-        step_count = 0
+        """write memory"""
+        # check for lazy loading
+        if not self._is_memory_mapped(address):
+            self._lazy_load_memory(address, len(data))
         
         try:
-            while True:
-                # check termination conditions
-                if end is not None and current_pc >= end:
-                    break
-                if count > 0 and step_count >= count:
-                    break
-                
-                # read and lift instruction
-                instruction_bytes = self.mem_read(current_pc, 4)  # assume 4-byte instructions
-                
-                # lift single instruction
-                ircfg, next_pc = self._lift_and_execute_instruction(current_pc, instruction_bytes)
-                
-                if next_pc is None:
-                    self.log.dbg("emulation stopped - no next PC")
-                    break
-                
-                current_pc = next_pc
-                step_count += 1
-                
-                self.log.dbg(f"emulation step {step_count}: pc=0x{current_pc:x}")
-                
+            self._jitter.vm.set_mem(address, data)
         except Exception as e:
-            self.log.err(f"emulation failed at pc 0x{current_pc:x}: {e}")
-            raise EmulationError(f"emulation failed: {e}")
-        
-        return current_pc
-
-    def _lift_and_execute_instruction(self, pc: int, instruction_bytes: bytes) -> Tuple[Any, Optional[int]]:
-        """lift and execute a single instruction"""
-        
-        # disassemble instruction
-        if len(instruction_bytes) < 4:
-            return None, None
-            
-        instr = self._mn.dis(instruction_bytes[:4], 'l' if self.exe.arch == Arch.ARM64 else 'b')
-        if not instr:
-            self.log.warn(f"failed to disassemble instruction at 0x{pc:x}: {instruction_bytes.hex()}")
-            return None, None
-        
-        self.log.dbg(f"disassembled at 0x{pc:x}: {instr}")
-        
-        # create IR for this instruction
-        ircfg = self._lifter.new_ircfg()
-        
-        # set instruction properties
-        instr.offset = pc
-        instr.l = 4  # ARM64 instructions are 4 bytes
-        self._lifter.add_instr_to_ircfg(instr, ircfg)
-        
-        # execute the IR symbolically
-        # run_at returns the address it stopped at (or None)
-        stop_addr = self._symb_engine.run_at(ircfg, pc)
-        
-        # get next PC - after execution, PC should have advanced
-        next_pc = None
-        if self._pc_reg in self._symb_engine.symbols:
-            pc_expr = self._symb_engine.symbols[self._pc_reg]
-            if isinstance(pc_expr, ExprInt):
-                next_pc = pc_expr.arg
-            else:
-                # PC is symbolic - could be a conditional jump
-                self.log.dbg(f"PC is symbolic: {pc_expr}")
-        
-        # if PC hasn't changed, it means we need to advance it by instruction size
-        if next_pc == pc:
-            next_pc = pc + 4  # ARM64 instructions are 4 bytes
-            self._symb_engine.symbols[self._pc_reg] = ExprInt(next_pc, self._pc_reg.size)
-        
-        return ircfg, next_pc
-
-    def symbolize_register(self, reg_id: Any, name: str) -> None:
-        """symbolize a register with given name"""
+            raise EmulationError(f"memory write failed @ 0x{address:x}: {e}")
+    
+    def _is_memory_mapped(self, address: int) -> bool:
+        """check if memory is mapped"""
         try:
-            if isinstance(reg_id, str):
-                reg = getattr(self._regs, reg_id.upper())
-            else:
-                reg = reg_id
-            
-            sym_expr = ExprId(name, reg.size)
-            self._symb_engine.symbols[reg] = sym_expr
-            self.log.dbg(f"symbolized register {reg} as {name}")
-        except Exception as e:
-            self.log.err(f"register symbolization failed for {reg_id}: {e}")
-            raise EmulationError(f"register symbolization failed: {e}")
-
-    def symbolize_memory(self, address: int, size: int, name: str) -> None:
-        """symbolize memory region with given name"""
-        try:
-            for i in range(size):
-                addr = address + i
-                mem_expr = ExprMem(ExprInt(addr, self.exe.arch.bits), 8)
-                sym_expr = ExprId(f"{name}_{i}", 8)
-                self._symb_engine.symbols[mem_expr] = sym_expr
-            self.log.dbg(f"symbolized memory 0x{address:x}[{size}] as {name}")
-        except Exception as e:
-            self.log.err(f"memory symbolization failed at 0x{address:x}: {e}")
-            raise EmulationError(f"memory symbolization failed: {e}")
-
-    def get_symbolic_register(self, reg_id: Any) -> Optional[str]:
-        """get symbolic expression for register"""
-        try:
-            if isinstance(reg_id, str):
-                reg = getattr(self._regs, reg_id.upper())
-            else:
-                reg = reg_id
-            
-            if reg in self._symb_engine.symbols:
-                return str(self._symb_engine.symbols[reg])
-            return None
-        except Exception as e:
-            self.log.err(f"get symbolic register failed for {reg_id}: {e}")
-            return None
-
-    def get_symbolic_memory(self, address: int) -> Optional[str]:
-        """get symbolic expression for memory"""
-        try:
-            mem_expr = ExprMem(ExprInt(address, self.exe.arch.bits), 8)
-            if mem_expr in self._symb_engine.symbols:
-                return str(self._symb_engine.symbols[mem_expr])
-            return None
-        except Exception as e:
-            self.log.err(f"get symbolic memory failed at 0x{address:x}: {e}")
-            return None
-
-    def get_context(self) -> SymbolicExecutionEngine:
-        """get the underlying symbolic execution engine"""
-        return self._symb_engine
-
-    def add_memory_callback(self, callback: Callable) -> None:
-        """add callback for lazy memory loading"""
-        self._memory_lazy_load_callback = callback
-
-    def reset_symbolic_state(self) -> None:
-        """reset all symbolic state"""
-        # keep concrete memory but clear symbolic registers
-        concrete_memory = {}
-        for key, val in self._symb_engine.symbols.items():
-            if isinstance(key, ExprMem) and isinstance(val, ExprInt):
-                concrete_memory[key] = val
+            # try to read one byte
+            self._jitter.vm.get_mem(address, 1)
+            return True
+        except:
+            return False
+    
+    def _lazy_load_memory(self, address: int, size: int):
+        """lazy load memory from callbacks"""
+        for callback in self._memory_callbacks:
+            region = callback(address, size)
+            if region:
+                self.map_memory(region.address, region.size, region.permissions)
+                if region.data:
+                    self.mem_write(region.address, region.data)
+                self.log.dbg(f"lazy loaded region @ 0x{region.address:x} size=0x{region.size:x}")
+                return
+    
+    # register operations
+    def reg_read(self, reg_id: Union[str, int]) -> int:
+        """read register value"""
+        if isinstance(reg_id, str):
+            reg_name = self._normalize_register_name(reg_id)
+        else:
+            # assume it's already a normalized name
+            reg_name = reg_id
         
-        self._symb_engine.symbols.clear()
+        try:
+            return getattr(self._jitter.cpu, reg_name)
+        except AttributeError:
+            raise EmulationError(f"unknown register: {reg_name}")
+    
+    def reg_write(self, reg_id: Union[str, int], value: int) -> None:
+        """write register value"""
+        if isinstance(reg_id, str):
+            reg_name = self._normalize_register_name(reg_id)
+        else:
+            # assume it's already a normalized name
+            reg_name = reg_id
         
-        # restore concrete memory
-        for dst, src in concrete_memory.items():
-            self._symb_engine.symbols[dst] = src
-            
-        self.log.dbg("reset symbolic state, kept concrete memory")
-
-    def dump_state(self, show_memory: bool = True, show_registers: bool = True) -> None:
-        """dump current symbolic state"""
-        if show_registers:
-            self.log.info("=== Register State ===")
-            for reg, expr in self._symb_engine.symbols.items():
-                if not isinstance(reg, ExprMem):
-                    self.log.info(f"  {reg}: {expr}")
-        
-        if show_memory:
-            self.log.info("=== Memory State ===")
-            for mem_expr, val_expr in self._symb_engine.symbols.items():
-                if isinstance(mem_expr, ExprMem):
-                    addr = mem_expr.ptr
-                    if isinstance(addr, ExprInt):
-                        self.log.info(f"  [0x{addr.arg:x}]: {val_expr}")
-                    else:
-                        self.log.info(f"  [{addr}]: {val_expr}")
-
-    # Implement required abstract methods from BareMetalEmulator
-
-    def halt(self) -> None:
-        """stop emulation"""
-        # miasm doesn't have a specific halt mechanism
-        pass
-
-    def set_pc(self, value: int) -> None:
-        """set program counter value (architecture-independent)"""
-        self.reg_write(self._pc_reg, value)
-
-    def get_pc(self) -> int:
-        """get program counter value (architecture-independent)"""
-        return self.reg_read(self._pc_reg)
-
+        try:
+            setattr(self._jitter.cpu, reg_name, value)
+        except AttributeError:
+            raise EmulationError(f"unknown register: {reg_name}")
+    
     def get_reg_by_name(self, name: str) -> int:
         """read register by name (architecture-independent)"""
         return self.reg_read(name)
-
+    
     def set_reg_by_name(self, name: str, value: int) -> None:
         """write register by name (architecture-independent)"""
         self.reg_write(name, value)
-
-    def map_memory(self, address: int, size: int, permissions: Permission) -> None:
-        """map memory with generic Permission enum"""
-        # miasm doesn't require explicit memory mapping like unicorn
-        # memory is mapped on-demand when accessed
-        pass
-
-    def _map(self, address: int, size: int, permissions: Permission) -> None:
-        """internal method to map memory in the engine"""
-        # miasm doesn't require explicit memory mapping
-        pass
-
-    def _get_pc_reg(self) -> Any:
-        """get the program counter register identifier for this backend"""
-        return self._pc_reg
-
-    def _get_sp_reg(self) -> Any:
-        """get the stack pointer register identifier for this backend"""
-        return self._sp_reg
+    
+    def _normalize_register_name(self, name: str) -> str:
+        """normalize register name for miasm"""
+        # miasm uses uppercase for ARM64 registers
+        if self.exe.arch == Arch.ARM64:
+            # handle special aliases
+            if name.lower() == "sp":
+                return "SP"
+            elif name.lower() == "lr":
+                return "LR"
+            elif name.lower() == "pc":
+                return "PC"
+            # general purpose registers
+            elif name.lower().startswith("x"):
+                return name.upper()
+            elif name.lower().startswith("w"):
+                return name.upper()
+        elif self.exe.arch == Arch.X64:
+            # miasm uses uppercase for x64 registers
+            return name.upper()
+        elif self.exe.arch == Arch.X86:
+            # miasm uses uppercase for x86 registers  
+            return name.upper()
+        return name
+    
+    # execution
+    def emulate(self, start: Optional[int] = None, end: Optional[int] = None, 
+                count: int = 0, timeout: int = 0) -> Optional[int]:
+        """emulate instructions"""
+        if start is not None:
+            pc_name = get_pc_register(self.exe.arch)
+            setattr(self._jitter.cpu, pc_name, start)
+        
+        # setup breakpoint at end address if specified
+        if end is not None:
+            self._jitter.add_breakpoint(end, lambda j: False)
+        
+        # setup instruction count limit
+        if count > 0:
+            instr_count = [0]
+            def count_callback(jitter):
+                instr_count[0] += 1
+                return instr_count[0] < count
+            self._jitter.exec_cb = count_callback
+        
+        try:
+            # run jitter
+            self._jitter.run(start if start is not None else self.get_pc())
+            
+            # return current pc
+            pc_name = get_pc_register(self.exe.arch)
+            return getattr(self._jitter.cpu, pc_name)
+            
+        except Exception as e:
+            raise EmulationError(f"emulation failed: {e}")
+    
+    def halt(self) -> None:
+        """stop emulation"""
+        self._jitter.running = False
+    
+    def get_pc(self) -> int:
+        """get current program counter"""
+        pc_name = get_pc_register(self.exe.arch)
+        return getattr(self._jitter.cpu, pc_name)
+    
+    def set_pc(self, value: int) -> None:
+        """set program counter"""
+        pc_name = get_pc_register(self.exe.arch)
+        setattr(self._jitter.cpu, pc_name, value)
+    
+    # expose underlying components for external use
+    def get_jitter(self):
+        """get the underlying jitter for direct access"""
+        return self._jitter
+    
+    def get_machine(self):
+        """get the underlying machine for direct access"""
+        return self._machine
+    
+    def get_loc_db(self):
+        """get the location database"""
+        return self._loc_db
+    
+    # memory callbacks for lazy loading
+    def add_memory_callback(self, callback: Callable) -> None:
+        """add memory region callback for lazy loading"""
+        self._memory_callbacks.append(callback)
+    
+    # state management
+    def reset(self) -> None:
+        """reset emulator state"""
+        # reset cpu registers to zero
+        for attr in dir(self._jitter.cpu):
+            if not attr.startswith("_"):
+                try:
+                    setattr(self._jitter.cpu, attr, 0)
+                except:
+                    pass
+    
+    def dump_state(self) -> Dict[str, Any]:
+        """dump current emulator state"""
+        state = {
+            "pc": self.get_pc(),
+            "registers": {},
+        }
+        
+        # dump all registers
+        for attr in dir(self._jitter.cpu):
+            if attr.startswith("_"):
+                continue
+            try:
+                val = getattr(self._jitter.cpu, attr)
+                if isinstance(val, int):
+                    state["registers"][attr] = val
+            except:
+                pass
+        
+        return state

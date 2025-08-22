@@ -13,7 +13,7 @@ from .base import (
     BareMetalEmulator,
 )
 from .unicorn import UnicornEmulator
-from .miasm import MiasmEmulator
+from .miasm import MiasmJitterEmulator
 
 __all__ = [
     # base types
@@ -28,5 +28,5 @@ __all__ = [
     # concrete implementations
     "RawCodeBlob",
     "UnicornEmulator",
-    "MiasmEmulator",
+    "MiasmJitterEmulator",
 ]
