@@ -9,6 +9,7 @@ from redlog import get_logger, field
 from ..emu.base import Executable, Arch, Segment, Hook
 from ..emu.unicorn import UnicornEmulator
 from ..emu.triton import TritonEmulator
+from ..emu.maat import MaatEmulator
 from ..formats.w1dump import W1Dump, load_dump
 
 
@@ -304,4 +305,25 @@ def create_w1dump_triton_emulator(
     loader.load_registers_from_dump(emu)
 
     log.debug("triton emulator created successfully")
+    return emu, dump
+
+
+def create_w1dump_maat_emulator(
+    dump_path: str, module_name: Optional[str] = None, hooks: Hook = Hook.DEFAULT
+) -> Tuple[MaatEmulator, W1Dump]:
+    log = get_logger("w1dump.loader")
+    log.debug(f"creating maat emulator from {dump_path}")
+
+    # load dump and create executable
+    dump = load_w1dump(dump_path)
+    exe = W1DumpExecutable(dump, module_name)
+
+    # create emulator with built-in lazy loading
+    emu = MaatEmulator(exe, hooks)
+
+    # load initial register state
+    loader = W1DumpLoader(dump)
+    loader.load_registers_from_dump(emu)
+
+    log.debug("maat emulator created successfully")
     return emu, dump
