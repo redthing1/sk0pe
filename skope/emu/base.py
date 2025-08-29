@@ -11,6 +11,7 @@ from redlog import get_logger, field
 
 try:
     import capstone as cs
+
     HAS_CAPSTONE = True
 except ImportError:
     HAS_CAPSTONE = False
@@ -19,21 +20,25 @@ except ImportError:
 
 class SkopeError(Exception):
     """base exception for skope library"""
+
     pass
 
 
 class EmulationError(SkopeError):
     """emulation operation failed"""
+
     pass
 
 
 class MemoryError(SkopeError):
     """memory operation failed"""
+
     pass
 
 
 class ArchitectureError(SkopeError):
     """unsupported architecture or architecture-specific error"""
+
     pass
 
 
@@ -391,4 +396,6 @@ class BareMetalEmulator(Emulator):
         }
 
         arch, mode = arch_map[self.exe.arch]
-        return cs.Cs(arch, mode)
+        disasm = cs.Cs(arch, mode)
+        disasm.detail = True
+        return disasm
