@@ -269,7 +269,7 @@ def create_w1dump_unicorn_emulator(
 ) -> Tuple[UnicornEmulator, W1Dump]:
     """create unicorn emulator from w1dump file"""
     log = get_logger("w1dump.loader")
-    log.debug(f"creating unicorn emulator from {dump_path}")
+    log.dbg(f"creating unicorn emulator from {dump_path}")
 
     # load dump and create executable
     dump = load_w1dump(dump_path)
@@ -282,7 +282,7 @@ def create_w1dump_unicorn_emulator(
     loader = W1DumpLoader(dump)
     loader.load_registers_from_dump(emu)
 
-    log.debug("unicorn emulator created successfully")
+    log.dbg("unicorn emulator created successfully")
     return emu, dump
 
 
@@ -291,7 +291,7 @@ def create_w1dump_triton_emulator(
 ) -> Tuple[TritonEmulator, W1Dump]:
     """create triton emulator from w1dump file"""
     log = get_logger("w1dump.loader")
-    log.debug(f"creating triton emulator from {dump_path}")
+    log.dbg(f"creating triton emulator from {dump_path}")
 
     # load dump and create executable
     dump = load_w1dump(dump_path)
@@ -304,7 +304,7 @@ def create_w1dump_triton_emulator(
     loader = W1DumpLoader(dump)
     loader.load_registers_from_dump(emu)
 
-    log.debug("triton emulator created successfully")
+    log.dbg("triton emulator created successfully")
     return emu, dump
 
 
@@ -312,7 +312,7 @@ def create_w1dump_maat_emulator(
     dump_path: str, module_name: Optional[str] = None, hooks: Hook = Hook.DEFAULT
 ) -> Tuple[MaatEmulator, W1Dump]:
     log = get_logger("w1dump.loader")
-    log.debug(f"creating maat emulator from {dump_path}")
+    log.dbg(f"creating maat emulator from {dump_path}")
 
     # load dump and create executable
     dump = load_w1dump(dump_path)
@@ -325,5 +325,5 @@ def create_w1dump_maat_emulator(
     loader = W1DumpLoader(dump)
     loader.load_registers_from_dump(emu)
 
-    log.debug("maat emulator created successfully")
+    log.dbg("maat emulator created successfully")
     return emu, dump
