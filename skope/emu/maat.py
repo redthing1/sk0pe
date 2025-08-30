@@ -88,6 +88,28 @@ class MaatEmulator(BareMetalEmulator):
         # initialize sp to top of stack
         self.sp = self.stack_base + self.stack_size
         self.log.dbg(f"stack pointer initialized to 0x{self.sp:x}")
+        
+        # map dummy memory at 0x0 to prevent "raw pointer" errors
+        try:
+            self.map_memory(0, 0x1000, Permission.READ)
+            # write architecture-specific NOP instructions
+            if self.exe.arch == Arch.ARM64:
+                # ARM64 NOP: 0x1f2003d5
+                nop_bytes = b'\xd5\x03\x20\x1f' * (0x1000 // 4)
+            elif self.exe.arch == Arch.X64:
+                # x64 NOP: 0x90
+                nop_bytes = b'\x90' * 0x1000
+            elif self.exe.arch == Arch.X86:
+                # x86 NOP: 0x90
+                nop_bytes = b'\x90' * 0x1000
+            else:
+                # fallback to zeros
+                nop_bytes = b'\x00' * 0x1000
+            
+            self.mem_write(0, nop_bytes[:0x1000])
+            self.log.dbg(f"mapped dummy memory at 0x0 with {self.exe.arch.name} NOPs")
+        except Exception as e:
+            self.log.dbg(f"failed to map dummy memory at 0x0: {e}")
 
     def _load_segments(self) -> None:
         # check if this is a W1DumpExecutable so we can access all regions
@@ -119,8 +141,91 @@ class MaatEmulator(BareMetalEmulator):
 
             self.log.dbg("all segments loaded")
 
+    def _make_hook_wrapper(self, method_name):
+        """create weakref wrapper to avoid reference cycles"""
+        import weakref
+        weak_self = weakref.ref(self)
+        
+        def wrapper(engine, data):
+            self_ref = weak_self()
+            if self_ref:
+                return getattr(self_ref, method_name)(engine, data)
+            return maat.ACTION.CONTINUE
+        return wrapper
+
     def _install_hooks(self) -> None:
         self.log.dbg("installing hooks")
+        
+        if self.hooks & Hook.CODE_EXECUTE:
+            self._engine.hooks.add(
+                maat.EVENT.EXEC,
+                maat.WHEN.BEFORE,
+                callbacks=[self._make_hook_wrapper('_hook_code')],
+                data=[],
+                name="code_execute_hook"
+            )
+            
+        if self.hooks & Hook.MEMORY_READ:
+            self._engine.hooks.add(
+                maat.EVENT.MEM_R,
+                maat.WHEN.BEFORE,
+                callbacks=[self._make_hook_wrapper('_hook_mem_read')],
+                data=[],
+                name="mem_read_hook"
+            )
+            
+        if self.hooks & Hook.MEMORY_WRITE:
+            self._engine.hooks.add(
+                maat.EVENT.MEM_W,
+                maat.WHEN.BEFORE,
+                callbacks=[self._make_hook_wrapper('_hook_mem_write')],
+                data=[],
+                name="mem_write_hook"
+            )
+
+    def _hook_code(self, engine, data):
+        # get current instruction address from engine
+        addr = engine.info.addr
+        # skip invalid addresses
+        if addr == 0:
+            return maat.ACTION.CONTINUE
+        # get actual instruction size from maat
+        try:
+            asm_inst = engine.get_asm_inst(addr)
+            size = asm_inst.raw_size()
+        except:
+            # fallback if instruction not available
+            size = 4 if self.exe.arch == Arch.ARM64 else 1
+        result = self.hook_code_execute(addr, size)
+        return maat.ACTION.CONTINUE if result else maat.ACTION.HALT
+
+    def _hook_mem_read(self, engine, data):
+        if engine.info.mem_access:
+            # get address (handle both concrete and symbolic)
+            addr = engine.info.mem_access.addr.as_uint() if hasattr(engine.info.mem_access.addr, 'as_uint') else engine.info.mem_access.addr
+            size = engine.info.mem_access.size
+            # get actual value from maat
+            try:
+                value = engine.info.mem_access.value.as_uint() if hasattr(engine.info.mem_access.value, 'as_uint') else int(engine.info.mem_access.value)
+            except:
+                value = 0  # fallback if value not available
+            result = self.hook_memory_read(addr, size, value)
+            return maat.ACTION.CONTINUE if result else maat.ACTION.HALT
+        return maat.ACTION.CONTINUE
+
+    def _hook_mem_write(self, engine, data):
+        if engine.info.mem_access:
+            # get address (handle both concrete and symbolic)
+            addr = engine.info.mem_access.addr.as_uint() if hasattr(engine.info.mem_access.addr, 'as_uint') else engine.info.mem_access.addr
+            size = engine.info.mem_access.size
+            # get actual value being written
+            try:
+                value = engine.info.mem_access.value.as_uint() if hasattr(engine.info.mem_access.value, 'as_uint') else int(engine.info.mem_access.value)
+            except:
+                value = 0  # fallback if value not available
+            result = self.hook_memory_write(addr, size, value)
+            return maat.ACTION.CONTINUE if result else maat.ACTION.HALT
+        return maat.ACTION.CONTINUE
 
     def _map(self, address: int, size: int, permissions: Permission) -> None:
         # maat uses start/end addressing

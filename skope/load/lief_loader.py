@@ -467,3 +467,18 @@ def create_lief_unicorn_emulator_from_executable(
     from ..emu.unicorn import UnicornEmulator
 
     return UnicornEmulator(executable, hooks)
+
+
+def create_lief_maat_emulator(binary_path: str, hooks: int = 0) -> "MaatEmulator":
+    from ..emu.maat import MaatEmulator
+
+    executable = load_binary(binary_path)
+    return MaatEmulator(executable, hooks)
+
+
+def create_lief_maat_emulator_from_executable(
+    executable: LiefExecutable, hooks: int = 0
+) -> "MaatEmulator":
+    from ..emu.maat import MaatEmulator
+
+    return MaatEmulator(executable, hooks)
