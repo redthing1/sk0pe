@@ -88,28 +88,6 @@ class MaatEmulator(BareMetalEmulator):
         # initialize sp to top of stack
         self.sp = self.stack_base + self.stack_size
         self.log.dbg(f"stack pointer initialized to 0x{self.sp:x}")
-        
-        # map dummy memory at 0x0 to prevent "raw pointer" errors
-        try:
-            self.map_memory(0, 0x1000, Permission.READ)
-            # write architecture-specific NOP instructions
-            if self.exe.arch == Arch.ARM64:
-                # arm64 nop
-                nop_bytes = b'\x1f\x20\x03\xd5' * (0x1000 // 4)
-            elif self.exe.arch == Arch.X64:
-                # x64 nop: 0x90
-                nop_bytes = b'\x90' * 0x1000
-            elif self.exe.arch == Arch.X86:
-                # x86 nop: 0x90
-                nop_bytes = b'\x90' * 0x1000
-            else:
-                # fallback to zeros
-                nop_bytes = b'\x00' * 0x1000
-            
-            self.mem_write(0, nop_bytes[:0x1000])
-            self.log.dbg(f"mapped dummy memory at 0x0 with {self.exe.arch.name} NOPs")
-        except Exception as e:
-            self.log.dbg(f"failed to map dummy memory at 0x0: {e}")
 
     def _load_segments(self) -> None:
         # check if this is a W1DumpExecutable so we can access all regions
