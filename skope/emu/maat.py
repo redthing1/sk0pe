@@ -94,13 +94,13 @@ class MaatEmulator(BareMetalEmulator):
             self.map_memory(0, 0x1000, Permission.READ)
             # write architecture-specific NOP instructions
             if self.exe.arch == Arch.ARM64:
-                # ARM64 NOP: 0x1f2003d5
-                nop_bytes = b'\xd5\x03\x20\x1f' * (0x1000 // 4)
+                # arm64 nop
+                nop_bytes = b'\x1f\x20\x03\xd5' * (0x1000 // 4)
             elif self.exe.arch == Arch.X64:
-                # x64 NOP: 0x90
+                # x64 nop: 0x90
                 nop_bytes = b'\x90' * 0x1000
             elif self.exe.arch == Arch.X86:
-                # x86 NOP: 0x90
+                # x86 nop: 0x90
                 nop_bytes = b'\x90' * 0x1000
             else:
                 # fallback to zeros
