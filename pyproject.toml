@@ -13,6 +13,7 @@ dependencies = [
     "keystone-engine",
     "lief",
     "msgpack>=1.1.1",
+    "pymaat",
     "redlog-py>=0.1.1",
     "setuptools>=80.9.0",
     "tqdm>=4.67.1",
@@ -25,3 +26,4 @@ dependencies = [
 lief = { git = "https://github.com/lief-project/LIEF.git", subdirectory = "api/python" }
 keystone-engine = { git = "https://github.com/redthing1/keystone-engine.git", subdirectory = "bindings/python" }
 triton-library = { git = "https://github.com/redthing1/triton" }
+pymaat = { git = "https://github.com/redthing1/maat" }

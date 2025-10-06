@@ -100,6 +100,11 @@ wheels = [
 ]
 
 [[package]]
+name = "pymaat"
+version = "0.1.dev182"
+source = { git = "https://github.com/redthing1/maat#2236d0e482324513ccf8a05407fc2d4308c70b7e" }
+
+[[package]]
 name = "redlog-py"
 version = "0.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -152,6 +157,7 @@ dependencies = [
     { name = "keystone-engine" },
     { name = "lief" },
     { name = "msgpack" },
+    { name = "pymaat" },
     { name = "redlog-py" },
     { name = "setuptools" },
     { name = "tqdm" },
@@ -166,6 +172,7 @@ requires-dist = [
     { name = "keystone-engine", git = "https://github.com/redthing1/keystone-engine.git?subdirectory=bindings%2Fpython" },
     { name = "lief", git = "https://github.com/lief-project/LIEF.git?subdirectory=api%2Fpython" },
     { name = "msgpack", specifier = ">=1.1.1" },
+    { name = "pymaat", git = "https://github.com/redthing1/maat" },
     { name = "redlog-py", specifier = ">=0.1.1" },
     { name = "setuptools", specifier = ">=80.9.0" },
     { name = "tqdm", specifier = ">=4.67.1" },
