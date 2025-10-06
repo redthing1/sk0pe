@@ -3,11 +3,16 @@
 unicorn engine implementation of the emulator interface
 """
 
-from typing import Dict, List, Optional, Any
+from typing import Dict, Optional, Any, Tuple
 from redlog import get_logger, field
 
 from .base import BareMetalEmulator, Executable, Hook, Arch, Segment, Permission
-from .arch import get_pc_register
+from .arch import (
+    get_pc_register,
+    get_flag_spec,
+    get_default_flag_value,
+    resolve_flag_register,
+)
 
 try:
     import unicorn as uc
@@ -16,6 +21,13 @@ try:
 except ImportError:
     HAS_UNICORN = False
     uc = None
+
+
+FLAG_REGISTER_ATTRS: Dict[Arch, Tuple[str, ...]] = {
+    Arch.X86: ("UC_X86_REG_EFLAGS",),
+    Arch.X64: ("UC_X86_REG_EFLAGS",),
+    Arch.ARM64: ("UC_ARM64_REG_NZCV", "UC_ARM64_REG_PSTATE"),
+}
 
 
 class UnicornEmulator(BareMetalEmulator):
@@ -122,6 +134,9 @@ class UnicornEmulator(BareMetalEmulator):
         self.sp = self.stack_base + self.stack_size
         self.log.dbg(f"stack pointer initialized to 0x{self.sp:x}")
 
+        # seed architecture-specific default flags
+        self._seed_default_flags()
+
     def _install_hooks(self) -> None:
         """install requested hooks"""
         if self.hooks & Hook.CODE_EXECUTE:
@@ -202,13 +217,18 @@ class UnicornEmulator(BareMetalEmulator):
         """get unicorn register constant by name"""
         name_upper = name.upper()
 
+        canonical_flag = resolve_flag_register(self.exe.arch, name)
+        if canonical_flag:
+            for attr_name in FLAG_REGISTER_ATTRS.get(self.exe.arch, tuple()):
+                if hasattr(self._arch_consts, attr_name):
+                    return getattr(self._arch_consts, attr_name)
+            raise ValueError(f"flag register {name} unsupported for {self.exe.arch}")
+
         if self.exe.arch == Arch.ARM64:
-            # handle special cases
             if name == "sp":
                 return self._arch_consts.UC_ARM64_REG_SP
-            elif name == "pc":
+            if name == "pc":
                 return self._arch_consts.UC_ARM64_REG_PC
-            # general purpose registers
             reg_attr = f"UC_ARM64_REG_{name_upper}"
             if hasattr(self._arch_consts, reg_attr):
                 return getattr(self._arch_consts, reg_attr)
@@ -219,6 +239,24 @@ class UnicornEmulator(BareMetalEmulator):
                 return getattr(self._arch_consts, reg_attr)
 
         raise ValueError(f"unknown register {name} for {self.exe.arch}")
+
+    def _seed_default_flags(self) -> None:
+        """Seed architectural default flag state for bare-metal setups."""
+
+        spec = get_flag_spec(self.exe.arch)
+        if not spec:
+            return
+
+        default_value = get_default_flag_value(self.exe.arch)
+        if default_value is None:
+            return
+
+        try:
+            self.set_reg_by_name(spec.aggregate, default_value)
+            self.log.trc(f"initialized {spec.aggregate} to 0x{default_value:x}")
+        except ValueError:
+            # unable to set flags?
+            self.log.wrn(f"unable to initialize {spec.aggregate} for {self.exe.arch}")
 
     def get_reg_by_name(self, name: str) -> int:
         """get register value by name"""

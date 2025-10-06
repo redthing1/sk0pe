@@ -10,6 +10,7 @@ from ..emu.base import Executable, Arch, Segment, Hook
 from ..emu.unicorn import UnicornEmulator
 from ..emu.triton import TritonEmulator
 from ..emu.maat import MaatEmulator
+from ..emu.arch import find_flag_value_in_state, get_flag_spec
 from ..formats.w1dump import W1Dump, load_dump
 
 
@@ -190,7 +191,7 @@ class W1DumpLoader:
         """load register state using architecture-independent interface"""
         from ..emu.arch import get_register_names, get_sp_register, get_pc_register
         from ..emu.base import Arch
-        
+
         # load general purpose registers using arch.py
         gp_regs = get_register_names(emulator.exe.arch, "gp")
         for reg_name in gp_regs:
@@ -202,36 +203,25 @@ class W1DumpLoader:
 
         # load special registers
         sp_reg = get_sp_register(emulator.exe.arch)
-        pc_reg = get_pc_register(emulator.exe.arch) 
-        
+        pc_reg = get_pc_register(emulator.exe.arch)
+
         if hasattr(gpr_state, sp_reg):
             sp_value = getattr(gpr_state, sp_reg)
             emulator.set_reg_by_name(sp_reg, sp_value)
             self.log.dbg(f"{sp_reg} = 0x{sp_value:x}")
-            
+
         if hasattr(gpr_state, pc_reg):
             pc_value = getattr(gpr_state, pc_reg)
             emulator.set_reg_by_name(pc_reg, pc_value)
             self.log.dbg(f"{pc_reg} = 0x{pc_value:x}")
 
         # handle architecture-specific flags
-        if emulator.exe.arch == Arch.ARM64 and hasattr(gpr_state, "cpsr"):
-            # arm64 status register  
-            from ..emu.arch import decode_arm64_cpsr
-            flags = decode_arm64_cpsr(gpr_state.cpsr)
-            for flag_name, flag_value in flags.items():
-                if flag_value:  # only set non-zero flags
-                    emulator.set_reg_by_name(flag_name, 1)
-            self.log.dbg(f"cpsr = 0x{gpr_state.cpsr:x}")
-            
-        elif emulator.exe.arch in (Arch.X64, Arch.X86) and hasattr(gpr_state, "eflags"):
-            # x86/x64 flags register
-            from ..emu.arch import decode_x86_flags
-            flags = decode_x86_flags(gpr_state.eflags)
-            for flag_name, flag_value in flags.items():
-                if flag_value:  # only set non-zero flags
-                    emulator.set_reg_by_name(flag_name, 1)
-            self.log.dbg(f"eflags = 0x{gpr_state.eflags:x}")
+        flag_spec = get_flag_spec(emulator.exe.arch)
+        if flag_spec:
+            flag_value = find_flag_value_in_state(emulator.exe.arch, gpr_state)
+            if flag_value is not None:
+                emulator.set_reg_by_name(flag_spec.aggregate, flag_value)
+                self.log.dbg(f"{flag_spec.aggregate} = 0x{flag_value:x}")
 
     def load_registers_from_dump(self, emulator) -> None:
         """load register state from dump into emulator"""
@@ -244,7 +234,6 @@ class W1DumpLoader:
 
         # use unified register loading method
         self.load_registers(emulator, gpr)
-
 
 
 def load_w1dump(dump_path: str) -> W1Dump:
