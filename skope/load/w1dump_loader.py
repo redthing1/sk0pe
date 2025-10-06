@@ -3,15 +3,17 @@
 w1dump loader - common functionality for loading w1dump files into emulators
 """
 
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, TYPE_CHECKING
 from dataclasses import dataclass
 from redlog import get_logger, field
 from ..emu.base import Executable, Arch, Segment, Hook
-from ..emu.unicorn import UnicornEmulator
-from ..emu.triton import TritonEmulator
-from ..emu.maat import MaatEmulator
 from ..emu.arch import find_flag_value_in_state, get_flag_spec
 from ..formats.w1dump import W1Dump, load_dump
+
+if TYPE_CHECKING:  # pragma: no cover (typing only)
+    from ..emu.unicorn import UnicornEmulator
+    from ..emu.triton import TritonEmulator
+    from ..emu.maat import MaatEmulator
 
 
 class W1DumpExecutable(Executable):
@@ -255,7 +257,7 @@ def load_w1dump(dump_path: str) -> W1Dump:
 
 def create_w1dump_unicorn_emulator(
     dump_path: str, module_name: Optional[str] = None, hooks: Hook = Hook.DEFAULT
-) -> Tuple[UnicornEmulator, W1Dump]:
+) -> Tuple["UnicornEmulator", W1Dump]:
     """create unicorn emulator from w1dump file"""
     log = get_logger("w1dump.loader")
     log.dbg(f"creating unicorn emulator from {dump_path}")
@@ -265,6 +267,8 @@ def create_w1dump_unicorn_emulator(
     exe = W1DumpExecutable(dump, module_name)
 
     # create emulator with built-in lazy loading
+    from ..emu import UnicornEmulator
+
     emu = UnicornEmulator(exe, hooks)
 
     # load initial register state
@@ -277,7 +281,7 @@ def create_w1dump_unicorn_emulator(
 
 def create_w1dump_triton_emulator(
     dump_path: str, module_name: Optional[str] = None, hooks: Hook = Hook.DEFAULT
-) -> Tuple[TritonEmulator, W1Dump]:
+) -> Tuple["TritonEmulator", W1Dump]:
     """create triton emulator from w1dump file"""
     log = get_logger("w1dump.loader")
     log.dbg(f"creating triton emulator from {dump_path}")
@@ -287,6 +291,8 @@ def create_w1dump_triton_emulator(
     exe = W1DumpExecutable(dump, module_name)
 
     # create emulator with built-in lazy loading
+    from ..emu import TritonEmulator
+
     emu = TritonEmulator(exe, hooks)
 
     # load initial register state
@@ -299,7 +305,7 @@ def create_w1dump_triton_emulator(
 
 def create_w1dump_maat_emulator(
     dump_path: str, module_name: Optional[str] = None, hooks: Hook = Hook.DEFAULT
-) -> Tuple[MaatEmulator, W1Dump]:
+) -> Tuple["MaatEmulator", W1Dump]:
     log = get_logger("w1dump.loader")
     log.dbg(f"creating maat emulator from {dump_path}")
 
@@ -308,6 +314,8 @@ def create_w1dump_maat_emulator(
     exe = W1DumpExecutable(dump, module_name)
 
     # create emulator with built-in lazy loading
+    from ..emu import MaatEmulator
+
     emu = MaatEmulator(exe, hooks)
 
     # load initial register state

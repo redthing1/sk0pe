@@ -92,7 +92,7 @@ def install_memory_error_logger(emu):
             getattr(uc, "UC_MEM_WRITE", None): "write",
             getattr(uc, "UC_MEM_FETCH", None): "fetch",
         }
-    except ImportError:  # pragma: no cover - backend may not be Unicorn
+    except ImportError:  # pragma: no cover (backend may not be Unicorn)
         access_map = {}
 
     def describe(access: int) -> str:

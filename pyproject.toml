@@ -13,13 +13,20 @@ dependencies = [
     "keystone-engine",
     "lief",
     "msgpack>=1.1.1",
-    "pymaat",
     "redlog-py>=0.1.1",
     "setuptools>=80.9.0",
     "tqdm>=4.67.1",
-    "triton-library",
     "typer>=0.16.0",
+]
+
+[project.optional-dependencies]
+unicorn = ["unicorn>=2.1.3"]
+triton = ["triton-library"]
+maat = ["pymaat"]
+all = [
     "unicorn>=2.1.3",
+    "triton-library",
+    "pymaat",
 ]
 
 [tool.uv.sources]
