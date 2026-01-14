@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-"""
-demo: emulate function calls in a test binary
-works with both unicorn and triton
-"""
+from __future__ import annotations
 
+from enum import Enum
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional
+
+import lief
 import typer
-from redlog import get_logger, set_level, Level
-from skope.load.lief_loader import (
-    load_binary,
-    create_lief_triton_emulator_from_executable,
-    create_lief_unicorn_emulator_from_executable,
-)
-from skope.emu import Hook
-from skope.emu.calling_convention import CallingConvention, Convention
+from redlog import Level, get_logger, set_level
+
+import skope
+from skope.backends import EmulatorConfig, HookType
+from skope.core.arch import Architecture
+from skope.core.permissions import MemoryPermissions
 
 app = typer.Typer(help="demo of emulated function calling")
 
@@ -22,63 +20,216 @@ app = typer.Typer(help="demo of emulated function calling")
 STOP_ADDRESS = 0x8000000000000000
 
 
-def setup_trace_hook(emu, log):
-    """set up proper instruction trace hook"""
+class Convention(Enum):
+    CDECL = "cdecl"
+    STDCALL = "stdcall"
+    FASTCALL = "fastcall"
+    THISCALL = "thiscall"
+    SYSV64 = "sysv64"
+    WIN64 = "win64"
+    AAPCS64 = "aapcs64"
+    WIN_ARM64 = "win_arm64"
 
-    # get disassembler for emu
-    disasm = emu.disassembler()
+
+class CallingConvention:
+    def __init__(self, emu):
+        self.emu = emu
+        self.arch = emu.arch
+        self.sp_reg = self.arch.sp_name
+        self.ret_reg = self.arch.return_name
+        self.word_size = self.arch.pointer_size
+        self.alignment = self.arch.stack_alignment
+
+    def setup_stack(self, stack_base: Optional[int] = None, stack_size: int = 0x100000):
+        if stack_base is None:
+            if self.arch in (Architecture.X64, Architecture.ARM64):
+                stack_base = 0x7FFF00000000
+            else:
+                stack_base = 0xBFFF0000
+
+        try:
+            self.emu.map(stack_base, stack_size, int(MemoryPermissions.RW))
+        except Exception:
+            pass
+
+        stack_top = stack_base + stack_size
+        stack_top &= ~(self.alignment - 1)
+        self.emu.reg_write(self.sp_reg, stack_top)
+        return stack_base, stack_size
+
+    def call_function(
+        self,
+        func_addr: int,
+        args: list,
+        return_addr: int = STOP_ADDRESS,
+        convention: Optional[Convention] = None,
+    ) -> None:
+        if convention is None:
+            convention = self._default_convention()
+
+        if self.arch == Architecture.X86:
+            self._call_x86(func_addr, args, return_addr, convention)
+        elif self.arch == Architecture.X64:
+            self._call_x64(func_addr, args, return_addr, convention)
+        elif self.arch == Architecture.ARM64:
+            self._call_arm64(func_addr, args, return_addr, convention)
+
+    def get_return_value(self) -> int:
+        return self.emu.reg_read(self.ret_reg)
+
+    def _default_convention(self) -> Convention:
+        if self.arch == Architecture.X86:
+            return Convention.CDECL
+        if self.arch == Architecture.X64:
+            return Convention.SYSV64
+        return Convention.AAPCS64
+
+    def _write_int(self, addr: int, value: int, size: int) -> None:
+        self.emu.write(addr, value.to_bytes(size, "little"))
+
+    def _call_x86(
+        self, func_addr: int, args: list, return_addr: int, convention: Convention
+    ) -> None:
+        sp = self.emu.reg_read(self.sp_reg)
+
+        if convention == Convention.FASTCALL and len(args) >= 1:
+            if len(args) >= 1:
+                self.emu.reg_write("ecx", args[0])
+            if len(args) >= 2:
+                self.emu.reg_write("edx", args[1])
+            stack_args = args[2:]
+        elif convention == Convention.THISCALL and len(args) >= 1:
+            self.emu.reg_write("ecx", args[0])
+            stack_args = args[1:]
+        else:
+            stack_args = args
+
+        sp -= 4
+        self._write_int(sp, return_addr, 4)
+
+        for arg in reversed(stack_args):
+            sp -= 4
+            self._write_int(sp, arg & 0xFFFFFFFF, 4)
+
+        self.emu.reg_write(self.sp_reg, sp)
+
+    def _call_x64(
+        self, func_addr: int, args: list, return_addr: int, convention: Convention
+    ) -> None:
+        sp = self.emu.reg_read(self.sp_reg)
+
+        sp -= 8
+        self._write_int(sp, return_addr, 8)
+
+        if convention == Convention.SYSV64:
+            reg_args = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
+        else:
+            reg_args = ["rcx", "rdx", "r8", "r9"]
+            sp -= 32
+
+        for i, arg in enumerate(args[: len(reg_args)]):
+            self.emu.reg_write(reg_args[i], arg)
+
+        stack_args = args[len(reg_args) :]
+        for arg in reversed(stack_args):
+            sp -= 8
+            self._write_int(sp, arg, 8)
+
+        if sp % 16 != 0:
+            sp -= 8
+
+        self.emu.reg_write(self.sp_reg, sp)
+
+    def _call_arm64(
+        self, func_addr: int, args: list, return_addr: int, convention: Convention
+    ) -> None:
+        for i, arg in enumerate(args[:8]):
+            self.emu.reg_write(f"x{i}", arg)
+
+        self.emu.reg_write("x30", return_addr)
+        sp = self.emu.reg_read(self.sp_reg)
+        self.emu.reg_write("x29", sp)
+
+        if len(args) > 8:
+            stack_args = args[8:]
+            for arg in reversed(stack_args):
+                sp -= 8
+                self._write_int(sp, arg, 8)
+            self.emu.reg_write(self.sp_reg, sp)
+
+
+def _make_disassembler(arch: Architecture):
+    import capstone as cs
+
+    if arch == Architecture.X86:
+        return cs.Cs(cs.CS_ARCH_X86, cs.CS_MODE_32)
+    if arch == Architecture.X64:
+        return cs.Cs(cs.CS_ARCH_X86, cs.CS_MODE_64)
+    if arch == Architecture.ARM64:
+        return cs.Cs(cs.CS_ARCH_ARM64, cs.CS_MODE_ARM)
+    raise ValueError(f"unsupported architecture: {arch}")
+
+
+def setup_trace_hook(emu, log):
+    disasm = _make_disassembler(emu.arch)
 
     def trace_code(address, size):
-        # read and disassemble instruction
         try:
-            code = emu.mem_read(address, min(size, 16))
+            code = emu.read(address, min(size, 16))
             insns = list(disasm.disasm(code, address, 1))
             if insns:
                 insn = insns[0]
                 print(f"  0x{address:08x}: {insn.mnemonic:<8} {insn.op_str}")
             else:
                 print(f"  0x{address:08x}: <{code[:size].hex()}>")
-        except Exception as e:
-            log.err(f"trace error at 0x{address:x}: {e}")
+        except Exception as exc:
+            log.err(f"trace error at 0x{address:x}: {exc}")
         return True
 
-    emu.hook_code_execute = trace_code
+    emu.hooks.add(HookType.CODE, trace_code)
 
 
 def run_function_test(
     emu,
-    cc,
+    cc: CallingConvention,
     name: str,
     addr: int,
     args: list,
     expected: int,
     max_instructions: int = 100,
 ) -> bool:
-    """run a single function test"""
     log = get_logger("test")
 
     log.info(f"\n=== test: {name}({', '.join(str(a) for a in args)}) ===")
 
-    # set up function call with stop address
     cc.call_function(addr, args, return_addr=STOP_ADDRESS)
+    emu.pc = addr
 
-    # set PC to function start (triton needs this)
-    emu.set_pc(addr)
+    result = emu.run(start=addr, end=STOP_ADDRESS, count=max_instructions)
+    if result.error:
+        log.dbg(f"emulation stopped: {result.error}")
 
-    try:
-        # emulate until we hit the stop address
-        emu.emulate(start=addr, end=STOP_ADDRESS, count=max_instructions)
-    except Exception as e:
-        log.dbg(f"emulation stopped: {e}")
-
-    # get return value
-    result = cc.get_return_value()
-    success = result == expected
+    result_val = cc.get_return_value()
+    success = result_val == expected
 
     log.info(
-        f"{name} returned: {result} ({'correct' if success else f'wrong, expected {expected}'})"
+        f"{name} returned: {result_val} ({'correct' if success else f'wrong, expected {expected}'})"
     )
     return success
+
+
+def _find_function(binary: lief.Binary, name: str) -> Optional[int]:
+    for func in binary.abstract.exported_functions:
+        func_name = str(func.name) if func.name else ""
+        if name in func_name:
+            return int(func.address)
+
+    for sym in binary.abstract.symbols:
+        sym_name = str(sym.name) if sym.name else ""
+        if name in sym_name and bool(getattr(sym, "is_function", False)):
+            return int(sym.value)
+
+    return None
 
 
 @app.command()
@@ -106,21 +257,25 @@ def main(
         help="force specific calling convention (cdecl, stdcall, fastcall, sysv64, win64, etc)",
     ),
 ):
-    """demonstrate calling functions"""
-
-    # configure logging
     log = get_logger("demo")
     level = Level(min(Level.INFO + verbose, Level.ANNOYING))
     set_level(level)
 
-    # load binary
     log.inf(f"loading binary: {binary_path}")
-    exe = load_binary(str(binary_path))
-    log.info(f"format: {exe._format}, arch: {exe.arch.name}")
+    binary = lief.parse(str(binary_path))
+    if not binary:
+        log.err(f"failed to parse binary: {binary_path}")
+        raise typer.Exit(1)
 
-    # functions to call in binary
+    session = skope.open_binary(
+        str(binary_path),
+        backend=backend,
+        config=EmulatorConfig(load_strategy="all_regions"),
+    )
+    emu = session.emulator
+    log.info(f"arch: {emu.arch.value}")
+
     test_cases = [
-        # (name, args, expected_result)
         ("no_args", [], 42),
         ("one_arg", [21], 42),
         ("two_args", [10, 20], 30),
@@ -128,32 +283,29 @@ def main(
         ("factorial", [5], 120),
         ("nested_calc", [10], 62),
         ("return_64bit", [0x12345678, 0x9ABCDEF0], 0x9ABCDEF012345678),
-        ("array_sum", [0x40000000, 5], 15),  # will need to set up array in memory
-        ("memory_test", [0x40001000, 42], 0),  # will need to set up memory
-        ("read_global", [], 100),  # initial global value
-        ("string_length", [0x40002000], 11),  # will need to set up string
+        ("array_sum", [0x40000000, 5], 15),
+        ("memory_test", [0x40001000, 42], 0),
+        ("read_global", [], 100),
+        ("string_length", [0x40002000], 11),
     ]
 
-    # find function addresses
     functions = {}
     for test_name, _, _ in test_cases:
-        addr = exe.find_function(test_name)
+        addr = _find_function(binary, test_name)
         if addr:
             functions[test_name] = addr
             log.dbg(f"found {test_name} at 0x{addr:x}")
 
-    # also look for struct test functions
     struct_functions = ["sum_point", "make_point", "sum_large_struct", "modify_point"]
     for func_name in struct_functions:
-        addr = exe.find_function(func_name)
+        addr = _find_function(binary, func_name)
         if addr:
             functions[func_name] = addr
             log.dbg(f"found {func_name} at 0x{addr:x}")
 
-    # also look for global test functions
     global_functions = ["write_global", "modify_global"]
     for func_name in global_functions:
-        addr = exe.find_function(func_name)
+        addr = _find_function(binary, func_name)
         if addr:
             functions[func_name] = addr
             log.dbg(f"found {func_name} at 0x{addr:x}")
@@ -164,31 +316,11 @@ def main(
 
     log.info(f"found {len(functions)} test functions")
 
-    # create emulator
-    log.info(f"creating {backend} emulator")
-
-    # determine hooks
-    hooks = Hook.DEFAULT
-    if trace:
-        hooks |= Hook.CODE_EXECUTE
-
-    if backend == "triton":
-        emu = create_lief_triton_emulator_from_executable(exe, hooks)
-    else:
-        emu = create_lief_unicorn_emulator_from_executable(exe, hooks)
-
-    # ensure data sections are properly loaded for globals
-    # the emulator should already map these, but let's verify
-    log.dbg("checking data section mapping for globals")
-
-    # set up trace hook if requested
     if trace:
         setup_trace_hook(emu, log)
 
-    # create calling convention helper
     cc = CallingConvention(emu)
 
-    # parse convention override if provided
     conv_override = None
     if convention:
         try:
@@ -198,32 +330,24 @@ def main(
             log.err(f"unknown convention: {convention}")
             raise typer.Exit(1)
 
-    # set up stack
     stack_base, stack_size = cc.setup_stack()
     log.info(f"stack ready at 0x{stack_base:x}")
 
-    # set up memory for tests that need it
-    # allocate some test memory regions
     test_memory_base = 0x40000000
-    if hasattr(emu, "_uc"):  # unicorn
-        try:
-            emu._map(test_memory_base, 0x10000, 7)  # rwx
-        except:
-            pass  # might already be mapped
+    try:
+        emu.map(test_memory_base, 0x10000, int(MemoryPermissions.RWX))
+    except Exception:
+        pass
 
-    # set up array for array_sum test
     array_data = [1, 2, 3, 4, 5]
     for i, val in enumerate(array_data):
-        emu.mem_write(test_memory_base + i * 4, val.to_bytes(4, "little"))
+        emu.write(test_memory_base + i * 4, val.to_bytes(4, "little"))
 
-    # set up memory location for memory_test
-    emu.mem_write(0x40001000, (0).to_bytes(4, "little"))
+    emu.write(0x40001000, (0).to_bytes(4, "little"))
 
-    # set up string for string_length test
     test_string = b"hello world\x00"
-    emu.mem_write(0x40002000, test_string)
+    emu.write(0x40002000, test_string)
 
-    # run tests
     passed = 0
     total = 0
 
@@ -231,19 +355,15 @@ def main(
         if test_name not in functions:
             continue
 
-        # for mixed convention demo, use different conventions for different functions
         if conv_override:
             test_conv = conv_override
-        elif test_name == "two_args" and exe.arch.name == "X86":
-            # demo: use fastcall for two_args on x86
+        elif test_name == "two_args" and emu.arch == Architecture.X86:
             test_conv = Convention.FASTCALL
             log.dbg(f"using {test_conv.value} convention for {test_name}")
         else:
-            test_conv = None  # use default
+            test_conv = None
 
-        # run the test with appropriate convention
         if test_conv:
-            # need to recreate cc.call_function call with convention parameter
             log.info(
                 f"\n=== test: {test_name}({', '.join(str(a) for a in args)}) [conv: {test_conv.value}] ==="
             )
@@ -253,23 +373,18 @@ def main(
                 return_addr=STOP_ADDRESS,
                 convention=test_conv,
             )
-
-            # set PC to function start (triton needs this)
-            emu.set_pc(functions[test_name])
-
-            try:
-                emu.emulate(
-                    start=functions[test_name],
-                    end=STOP_ADDRESS,
-                    count=500 if test_name in ("factorial", "string_length") else 100,
-                )
-            except Exception as e:
-                log.dbg(f"emulation stopped: {e}")
-
-            result = cc.get_return_value()
-            success = result == expected
+            emu.pc = functions[test_name]
+            result = emu.run(
+                start=functions[test_name],
+                end=STOP_ADDRESS,
+                count=(500 if test_name in ("factorial", "string_length") else 100),
+            )
+            if result.error:
+                log.dbg(f"emulation stopped: {result.error}")
+            result_val = cc.get_return_value()
+            success = result_val == expected
             log.info(
-                f"{test_name} returned: {result} ({'correct' if success else f'wrong, expected {expected}'})"
+                f"{test_name} returned: {result_val} ({'correct' if success else f'wrong, expected {expected}'})"
             )
         else:
             success = run_function_test(
@@ -288,14 +403,9 @@ def main(
         if success:
             passed += 1
 
-    # test struct passing: Point struct gets passed as packed value in ARM64
     if "sum_point" in functions:
         log.info("\n=== test: struct passing (Point) ===")
-
-        # Point struct with x=10, y=20: pack into single 64-bit argument
-        # ARM64 packs small structs (<= 16 bytes) into registers
-        point_packed = (20 << 32) | 10  # y in high bits, x in low bits (little endian)
-
+        point_packed = (20 << 32) | 10
         success = run_function_test(
             emu,
             cc,
@@ -305,49 +415,35 @@ def main(
             30,
             max_instructions=50,
         )
-
         total += 1
         if success:
             passed += 1
 
-    # test stateful functions
     if "increment_counter" in functions and "get_counter" in functions:
         log.info("\n=== test: stateful functions ===")
-
-        # call increment_counter three times
         for i in range(3):
             cc.call_function(
                 functions["increment_counter"], [], return_addr=STOP_ADDRESS
             )
-            emu.set_pc(functions["increment_counter"])
-            try:
-                emu.emulate(
-                    start=functions["increment_counter"], end=STOP_ADDRESS, count=50
-                )
-            except Exception as e:
-                log.dbg(f"emulation stopped: {e}")
-            result = cc.get_return_value()
-            log.dbg(f"increment_counter() call {i+1} returned: {result}")
+            emu.pc = functions["increment_counter"]
+            emu.run(start=functions["increment_counter"], end=STOP_ADDRESS, count=50)
+            result_val = cc.get_return_value()
+            log.dbg(f"increment_counter() call {i+1} returned: {result_val}")
 
-        # check final counter value
         cc.call_function(functions["get_counter"], [], return_addr=STOP_ADDRESS)
-        emu.set_pc(functions["get_counter"])
-        try:
-            emu.emulate(start=functions["get_counter"], end=STOP_ADDRESS, count=50)
-        except Exception as e:
-            log.dbg(f"emulation stopped: {e}")
+        emu.pc = functions["get_counter"]
+        emu.run(start=functions["get_counter"], end=STOP_ADDRESS, count=50)
 
-        result = cc.get_return_value()
-        success = result == 3
+        result_val = cc.get_return_value()
+        success = result_val == 3
         log.info(
-            f"get_counter() returned: {result} ({'correct' if success else 'wrong, expected 3'})"
+            f"get_counter() returned: {result_val} ({'correct' if success else 'wrong, expected 3'})"
         )
 
         total += 1
         if success:
             passed += 1
 
-    # test global variable modification
     if (
         "write_global" in functions
         and "read_global" in functions
@@ -355,40 +451,28 @@ def main(
     ):
         log.info("\n=== test: global variable operations ===")
 
-        # write a new value
         cc.call_function(functions["write_global"], [200], return_addr=STOP_ADDRESS)
-        emu.set_pc(functions["write_global"])
-        try:
-            emu.emulate(start=functions["write_global"], end=STOP_ADDRESS, count=50)
-        except Exception as e:
-            log.dbg(f"emulation stopped: {e}")
+        emu.pc = functions["write_global"]
+        emu.run(start=functions["write_global"], end=STOP_ADDRESS, count=50)
 
-        # read it back
         cc.call_function(functions["read_global"], [], return_addr=STOP_ADDRESS)
-        emu.set_pc(functions["read_global"])
-        try:
-            emu.emulate(start=functions["read_global"], end=STOP_ADDRESS, count=50)
-        except Exception as e:
-            log.dbg(f"emulation stopped: {e}")
+        emu.pc = functions["read_global"]
+        emu.run(start=functions["read_global"], end=STOP_ADDRESS, count=50)
 
-        result = cc.get_return_value()
-        success = result == 200
+        result_val = cc.get_return_value()
+        success = result_val == 200
         log.info(
-            f"read_global() after write returned: {result} ({'correct' if success else 'wrong, expected 200'})"
+            f"read_global() after write returned: {result_val} ({'correct' if success else 'wrong, expected 200'})"
         )
 
-        # modify it
         cc.call_function(functions["modify_global"], [50], return_addr=STOP_ADDRESS)
-        emu.set_pc(functions["modify_global"])
-        try:
-            emu.emulate(start=functions["modify_global"], end=STOP_ADDRESS, count=50)
-        except Exception as e:
-            log.dbg(f"emulation stopped: {e}")
+        emu.pc = functions["modify_global"]
+        emu.run(start=functions["modify_global"], end=STOP_ADDRESS, count=50)
 
-        result = cc.get_return_value()
-        success = result == 250
+        result_val = cc.get_return_value()
+        success = result_val == 250
         log.info(
-            f"modify_global(50) returned: {result} ({'correct' if success else 'wrong, expected 250'})"
+            f"modify_global(50) returned: {result_val} ({'correct' if success else 'wrong, expected 250'})"
         )
 
         total += 2

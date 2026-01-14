@@ -15,7 +15,8 @@ uv run python ./scripts/demo_emu_funcs.py -vvv --backend triton --trace
 
 create a `w1dump` using [w1tn3ss](https://github.com/redthing1/w1tn3ss)
 
-then execute code in the dump:
+then symbolically execute code in the dump:
+
 ```sh
-uv run python ./scripts/w1dump_runner.py -vvv --dump <dump> --backend unicorn --start <addr> --count 50 --trace
+uv run ./scripts/w1dump_symbolic_emu.py -vvv --backend triton --count 40 --symbolize-all-gpr <dump> --start <addr> --trace
 ```
