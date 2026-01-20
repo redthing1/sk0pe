@@ -161,12 +161,12 @@ def _extract_section_regions(binary) -> List[MemoryRegion]:
 def _extract_elf_regions(binary) -> List[MemoryRegion]:
     regions: List[MemoryRegion] = []
     for seg in binary.segments:
-        if seg.type != lief.ELF.SEGMENT_TYPES.LOAD:
+        if seg.type != lief.ELF.Segment.TYPE.LOAD:
             continue
         perms = MemoryPermissions.from_rwx(
-            seg.has(lief.ELF.SEGMENT_FLAGS.R),
-            seg.has(lief.ELF.SEGMENT_FLAGS.W),
-            seg.has(lief.ELF.SEGMENT_FLAGS.X),
+            seg.has(lief.ELF.Segment.FLAGS.R),
+            seg.has(lief.ELF.Segment.FLAGS.W),
+            seg.has(lief.ELF.Segment.FLAGS.X),
         )
         start = int(seg.virtual_address)
         size = int(seg.virtual_size)
